@@ -1,0 +1,324 @@
+       	+---------------------------+
+		    |	          	CS 230				|
+		    | PROJECT 3: VIRTUAL MEMORY	|
+		    |	        DESIGN DOCUMENT		|
+		    +---------------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+Zhen Lin <zlin7@uchicago.edu>
+Haochen Wang <wanghaochen@uchicago.edu>
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+			PAGE TABLE MANAGEMENT
+			=====================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+struct frame
+{
+  struct lock lock;           /* Prevent simultaneous access. */
+  void *base;                 /* Kernel virtual base address. */
+  struct page *page;          /* Mapped process page, if any. */
+
+  bool pinned;
+};
+
+
+struct page
+{
+  /* Immutable members. */
+  void *addr;                 /* User virtual address. */
+  bool read_only;             /* Read-only page? */
+  struct thread *thread;      /* Owning thread. */
+
+  /* Accessed only in owning process context. */
+  struct hash_elem hash_elem; /* struct thread `pages' hash element. */
+
+  /* Set only in owning process context with frame->frame_lock held.           
+     Cleared only with scan_lock and frame->frame_lock held. */
+  struct frame *frame;        /* Page frame. */
+  /* Swap information, protected by frame->frame_lock. */
+  block_sector_t sector;       /* Starting sector of swap area, or -1. */
+
+
+  /* Memory-mapped file information, protected by frame->frame_lock. */
+  bool private;               /* False to write back to file,                  
+         true to write back to swap. */
+  struct file *file;          /* File. */
+  off_t file_offset;          /* Offset in file. */
+  off_t file_bytes;           /* Bytes to read/write, 1...PGSIZE. */
+
+//What we added
+  bool data; //indicates whether this is a page in the data segment
+
+  struct lock dummy_lock; //simple lock for a page
+};
+
+struct thread
+{
+  /* Owned by thread.c. */
+  tid_t tid;                          /* Thread identifier. */
+  enum thread_status status;          /* Thread state. */
+  char name[16];                      /* Name (for debugging purposes). */
+  uint8_t *stack;                     /* Saved stack pointer. */
+  int priority;                       /* Priority. */
+  struct list_elem allelem;           /* List element for all threads list\
+           . */
+
+  /* Owned by process.c. */
+  int exit_code;                      /* Exit code. */
+  struct wait_status *wait_status;    /* This process's completion status.\
+               */
+  struct list children;               /* Completion status of children. */
+
+  /* Shared between thread.c and synch.c. */
+  struct list_elem elem;              /* List element. */
+
+  /* Alarm clock. */
+  int64_t wakeup_time;                /* Time to wake this thread up. */
+  struct list_elem timer_elem;        /* Element in timer_wait_list. */
+  struct semaphore timer_sema;        /* Semaphore. */
+
+  /* Owned by userprog/process.c. */
+  uint32_t *pagedir;                  /* Page directory. */
+  struct hash *pages;                 /* Page table. */
+  struct file *bin_file;              /* The binary executable. */
+  //add back old stuff
+  int initialized; //used in p2
+  struct process_control_block* pcb; //used in p2
+  char* prog_name; //used in p2
+  struct list file_descriptors; //used in p2
+  struct lock pages_lock;//lock for "pages"
+
+  /* Owned by syscall.c. */
+  // struct list fds;                    /* List of file descriptors. */
+  struct list mappings;               /* Memory-mapped files. */
+  int next_handle;                    /* Next handle value. */
+  void *user_esp;                     /* User's stack pointer. */
+
+  /* Owned by thread.c. */
+  unsigned magic;                     /* Detects stack overflow. */
+};
+
+---- ALGORITHMS ----
+
+>> A2: In a few paragraphs, describe your code for locating the frame,
+>> if any, that contains the data of a given page.
+  Our supplemental page table has a pointer to the frame, if this page is
+indeed in the memory. (If not, it will be a null pointer). After we find the
+frame, the frame has a pointer, BASE, to kernel address, where the data is 
+stored.
+
+
+>> A3: How does your code coordinate accessed and dirty bits between
+>> kernel and user virtual addresses that alias a single frame, or
+>> alternatively how do you avoid the issue?
+  We avoided the issue by always accessing the user data through the user
+virtual address.
+
+---- SYNCHRONIZATION ----
+
+>> A4: When two user processes both need a new frame at the same time,
+>> how are races avoided?
+  We have a global lock, SCAN_LOCK, that allows only one thread in the process
+of finding a frame to use. To speed up the OS, this lock is released as soon 
+as the thread find the frame. However, before the paging is completed, the 
+frame is always pinned and will not be evicted by the other thread.
+
+---- RATIONALE ----
+
+>> A5: Why did you choose the data structure(s) that you did for
+>> representing virtual-to-physical mappings?
+  The memory does not grow. It is always a fixed amount, so we used an array.
+This design is provided by instructor. We agree to this design because this
+provide a fast access for something like frames, which do not grow or shrink.
+
+		       PAGING TO AND FROM DISK
+		       =======================
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+struct page
+{
+  ......
+  /* Swap information, protected by frame->frame_lock. */
+  block_sector_t sector;       /* Starting sector of swap area, or -1. */
+  ......
+};
+
+---- ALGORITHMS ----
+
+>> B2: When a frame is required but none is free, some frame must be
+>> evicted.  Describe your code for choosing a frame to evict.
+When a page fault is triggered this way, the handler will call page_in
+ which in turn calls frame_lock. This method will scan the frame table
+ array with the clock algorithm and picks up the frame to evict. Then
+ frame_lock will call page_out to dispose of the victim by swapping it
+ to swap space and return the new available slot.  
+
+
+>> B3: When a process P obtains a frame that was previously used by a
+>> process Q, how do you adjust the page table (and any other data
+>> structures) to reflect the frame Q no longer has?
+The frame pointer in the supplemental page table entry will be set to
+ NULL by frame_unlock. Thus the supplemental page of the victim will know
+ that the page is swapped out and no longer on the frame. In addition, the
+ present bit of that page in the pagedir of Q will be set to 0.
+
+
+>> B4: Explain your heuristic for deciding whether a page fault for an
+>> invalid virtual address should cause the stack to be extended into
+>> the page that faulted.
+  Basically, we allow an access to 32 bytes below the user stack pointer.
+For those accesses, we consider them stack growth, and allocate a new page
+if necessary.
+---- SYNCHRONIZATION ----
+
+>> B5: Explain the basics of your VM synchronization design.  In
+>> particular, explain how it prevents deadlock.  (Refer to the
+>> textbook for an explanation of the necessary conditions for
+>> deadlock.)
+We use several locks for supplemental page, frame, and swap and file_system 
+to make sure that the intended sequence of operations are carried out. In 
+particular, we make sure the key principles are obeyed in our design. Firstly,
+there is minimum sharing of locked resources across different files. Many of 
+the locks are static and visible only within the file scope. Secondly, there
+ is very little hold_and_wait, and circular wait.
+
+>> B6: A page fault in process P can cause another process Q's frame
+>> to be evicted.  How do you ensure that Q cannot access or modify
+>> the page during the eviction process?  How do you avoid a race
+>> between P evicting Q's frame and Q faulting the page back in?
+We clear the present bit before kicking the page out. In this way, if Q
+tries to access the page, it will page_fault(), which will then ask for a
+lock held by P. Thus, Q cannot access the page while P is kicking it out.
+  Moreover, we add in a field in the frame structure called pinned. If a f
+  rame is pinned, then the clock algorithm will skip the frame when selecting 
+  the victim page.  Thus, the above-mentioned scenario cannot happen because 
+  the page that Q is modifying cannot be evicted by P.
+
+>> B7: Suppose a page fault in process P causes a page to be read from
+>> the file system or swap.  How do you ensure that a second process Q
+>> cannot interfere by e.g. attempting to evict the frame while it is
+>> still being read in?
+Similarly, when a new page is targeted for swap in, the pinned member is
+ set to true and thus no one can evict this frame.
+
+>> B8: Explain how you handle access to paged-out pages that occur
+>> during system calls.  Do you use page faults to bring in pages (as
+>> in user programs), or do you have a mechanism for "locking" frames
+>> into physical memory, or do you use some other design?  How do you
+>> gracefully handle attempted accesses to invalid virtual addresses?
+To avoid possible errors, we use page faults to bring in pages. We thought
+about copying the data to kernel first, but decided it is not a good improve-
+ment given the use of kernel resources.
+---- RATIONALE ----
+
+>> B9: A single lock for the whole VM system would make
+>> synchronization easy, but limit parallelism.  On the other hand,
+>> using many locks complicates synchronization and raises the
+>> possibility for deadlock but allows for high parallelism.  Explain
+>> where your design falls along this continuum and why you chose to
+>> design it this way.
+We are close to the high end of the spectrum since we deploy at least 
+one lock per file. Notably, in frame.c, we add one lock per frame and 
+additional scan lock and pin lock to enable maximum concurrency while 
+maintaining correct synchronization. We design it this way to improve 
+the overall efficiency of the system.
+			 MEMORY MAPPED FILES
+			 ===================
+
+---- DATA STRUCTURES ----
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+struct page
+{
+  ......
+  /* Memory-mapped file information, protected by frame->frame_lock. */
+  bool private;               /* False to write back to file,                  
+         true to write back to swap. */
+  struct file *file;          /* File. */
+  off_t file_offset;          /* Offset in file. */
+  off_t file_bytes;           /* Bytes to read/write, 1...PGSIZE. */
+  ......
+};
+struct mapping
+{
+  struct list_elem elem;      /* List element. */
+  int handle;                 /* Mapping id. */
+  struct file *file;          /* File. */
+  uint8_t *base;              /* Start of memory mapping. */
+  size_t page_cnt;            /* Number of pages mapped. */
+};
+
+---- ALGORITHMS ----
+
+>> C2: Describe how memory mapped files integrate into your virtual
+>> memory subsystem.  Explain how the page fault and eviction
+>> processes differ between swap pages and other pages.
+Memory mapped files occupy a contiguous virtual memory region. When a page 
+fault happens, the page_in function will query the file member of the 
+supplemental page table and choose to a sys_file_read instead of a swap_in.
+
+>> C3: Explain how you determine whether a new file mapping overlaps
+>> any existing segment.
+When a mapped address overlaps an existing user virtual address, the 
+page_allocate method called in mmap will realize the duplication and returns 
+fail. Thus, the system will exit.
+---- RATIONALE ----
+
+>> C4: Mappings created with "mmap" have similar semantics to those of
+>> data demand-paged from executables, except that "mmap" mappings are
+>> written back to their original files, not to swap.  This implies
+>> that much of their implementation can be shared.  Explain why your
+>> implementation either does or does not share much of the code for
+>> the two situations.
+The page struct has FILE, FILE_OFFSET, FILE_BYTES fields, and they are 
+shared by both memory mapped files and those data demand-paged from
+executables. These pages are always different pages, so we don't need 
+to worry that we need two FILE pointers. We know which is which according
+to the READ_ONLY bool and PRIVATE bool.
+
+			   SURVEY QUESTIONS
+			   ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?

@@ -1,0 +1,269 @@
+		     +--------------------------+
+       	       	     |		CS 140		|
+		     | PROJECT 2: USER PROGRAMS	|
+		     | 	   DESIGN DOCUMENT     	|
+		     +--------------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+wanghaochen@uchicago.edu
+zhen7@uchicago.edu
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+To TA::::
+   We also modified process.h and init.c, out of necessity.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+			   ARGUMENT PASSING
+			   ================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+struct pass {
+  char* fname;
+  struct process_control_block* pcb;
+}; 
+We need to pass in extra arguments during thread_create(); Thus this wrapper allows 
+us to pass two pointers together.
+
+
+---- ALGORITHMS ----
+
+>> A2: Briefly describe how you implemented argument parsing.  How do
+>> you arrange for the elements of argv[] to be in the right order?
+>> How do you avoid overflowing the stack page?
+
+During load(), we copy the command name and parse it into argv and argc.
+Later after setup_stack returns, we push the arguments on the stack starting from
+PHY_BASE. To ensure the sequence of arguments are pushed correctly, we backwardly copy
+argument onto the stack after first decrementing the *esp by the length of the 
+corresponding arguments. Since the loop starts backward, the order is right.
+Exceeding length limit will trigger exit downstream.
+
+---- RATIONALE ----
+
+>> A3: Why does Pintos implement strtok_r() but not strtok()?
+For strtok_r, we need to prepare the save_ptr ourselves in the stack.
+While for strtok, the function itself prepares the save_ptr.
+The former is thread_safe since there is no risk that some other threads come in
+and change the inner save_ptr and screws up everything.
+
+>> A4: In Pintos, the kernel separates commands into a executable name
+>> and arguments.  In Unix-like systems, the shell does this
+>> separation.  Identify at least two advantages of the Unix approach.
+
+First, shell should do the checking instead of allowing all sorts junk being flushed
+into the kernel. A malicious 100000 arguments should not be dealt with by the kernel.
+There is no problem with the shell crashing. Kernel needs protection.
+
+Second, shell is a user program. It is a better practice to spend most of the time in
+user program than inside the kernel. Kernel time is precious.
+
+			     SYSTEM CALLS
+			     ============
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+struct process_control_block {
+  tid_t pid;
+  char* pname;
+  struct list_elem elem;
+  int signal;
+  struct semaphore exec;
+  struct semaphore wait;
+};
+
+process control block is the counterpart of struct thread in thread.h.
+This block contains the information about the process and is independent of the 
+underlying thread. It can only be freed after the process's parent waits for it.
+
+struct file_desc {
+  int fd;
+  struct file *file;
+  struct list_elem elem;
+};
+file descriptor can be inserted to a list and contains an ID and the file pointer.
+
+
+struct thread {
+	#ifdef USERPROG
+    /* Owned by userprog/process.c. */
+    struct process_control_block* pcb;
+    char *prog_name;
+    uint32_t *pagedir;                  /* Page directory. */
+    struct list children;
+    struct list file_descriptors;
+    struct file *executable; 
+	#endif
+}
+Each thread has some children and file descriptors, and a pcb structure which will
+endure after the thread exits, thus giving the parent a key to know how her child
+died. We can shift the children and file descriptors inside the pcb. But for this
+project this is sufficient.
+
+>> B2: Describe how file descriptors are associated with open files.
+>> Are file descriptors unique within the entire OS or just within a
+>> single process?
+Each file descriptor contains a file pointer. Thus there is a one-to-one mapping
+of file descriptor to an open file. In out implementation, each file has a fd unique
+to the entire OS. We simply put a static variable inside sys_open, and incrementing
+it every time a new file is opened. Thus, descriptor IDs are unique in the system.
+Doing it this way saves lots of debugging efforts.
+
+
+---- ALGORITHMS ----
+
+>> B3: Describe your code for reading and writing user data from the
+>> kernel.
+For read, first we check whether the validity of the arguments and the buffer. 
+Afterwards, we search whether is file descriptor within the thread's descriptors.
+If there is a match, we do the reading with file_read. If not matched, we return -1.
+
+For write, after the same preliminary, we check whehter the descriptor is STDOUT.
+If so, we simply putbuf. If not, we search the descriptor within the thread's 
+descriptors and follow the same procedure as above. 
+
+>> B4: Suppose a system call causes a full page (4,096 bytes) of data
+>> to be copied from user space into the kernel.  What is the least
+>> and the greatest possible number of inspections of the page table
+>> (e.g. calls to pagedir_get_page()) that might result?  What about
+>> for a system call that only copies 2 bytes of data?  Is there room
+>> for improvement in these numbers, and how much?
+
+For a full page of data:
+The least number is 1. One page would fit just right if an emtry page is fetched 
+back.
+
+The greatest number might be 4096 if it’s not contiguous. In this case we have
+to check every address to ensure a valid access. When it’s contiguous, the
+greatest number would be 2, if we get a kernel virtual address that is not a
+page head, we surely want to check the start pointer and the end pointer of the
+full page data, see if it’s mapped. 
+
+>> B5: Briefly describe your implementation of the "wait" system call
+>> and how it interacts with process termination.
+Given the child's ID, we search for its pcb structure with search_child()
+Then, wait() will press down the wait semaphore inside the child pcb. The parent 
+will block untill the child exits and then retrive the signal back from the pcb.
+This signal is the exit status. Then, the child pcb is useless and we can safely
+free its memory.
+
+>> B6: Any access to user program memory at a user-specified address
+>> can fail due to a bad pointer value.  Such accesses must cause the
+>> process to be terminated.  System calls are fraught with such
+>> accesses, e.g. a "write" system call requires reading the system
+>> call number from the user stack, then each of the call's three
+>> arguments, then an arbitrary amount of user memory, and any of
+>> these can fail at any point.  This poses a design and
+>> error-handling problem: how do you best avoid obscuring the primary
+>> function of code in a morass of error-handling?  Furthermore, when
+>> an error is detected, how do you ensure that all temporarily
+>> allocated resources (locks, buffers, etc.) are freed?  In a few
+>> paragraphs, describe the strategy or strategies you adopted for
+>> managing these issues.  Give an example.
+
+First, avoiding bad user memory access is done by checking before validating.
+The function check_pointer uses the get_user method provided in the documentation
+and tells us whether an address has been mapped. Taking write system call as an example, 
+the esp pointer and the three arguments pointer will be checked first. If anything is
+invalid, terminate the process. Then we check the buffer validity by checking 
+its head and tail.
+
+If there is more error, it is handled downstream by the page_fault exception.
+
+---- SYNCHRONIZATION ----
+
+>> B7: The "exec" system call returns -1 if loading the new executable
+>> fails, so it cannot return before the new executable has completed
+>> loading.  How does your code ensure this?  How is the load
+>> success/failure status passed back to the thread that calls "exec"?
+We use the exec semaphore inside the pcb. Like we said before, we create a special
+pass structure to pass the created pcb and file_name together into thread_create.
+Thus, during start_process(), the kernel can directly put the load status into the 
+pcb signal, and raise the semaphore. On the other end, the kernel will press down the
+semaphore to block and then retrieve the signal. Thus, we can know exactly what 
+happened.
+
+>> B8: Consider parent process P with child process C.  How do you
+>> ensure proper synchronization and avoid race conditions when P
+>> calls wait(C) before C exits?  After C exits?  How do you ensure
+>> that all resources are freed in each case?  How about when P
+>> terminates without waiting, before C exits?  After C exits?  Are
+>> there any special cases?
+
+We have semaphores inside the pcb structures to prevent race conditions.
+
+The list of pcb is eventually cleaned by the clean_process_list()
+* P calls wait(C) before C exits
+This is the simplest of cases. The parent blocks on the semaphore, and then destroy
+pcb after retrieving the signal.
+
+* P calls wait(C) after C exits
+Since the signal in pcb has already registered the exti status, and raised the semaphore,
+the parent will get back the info and destroy pcb gracefully.
+
+* P terminates without waiting before C exits
+Leftover pcb like this will be cleaned when the initial thread exits. 
+clean_process_list() will do the laundry.
+
+
+---- RATIONALE ----
+
+>> B9: Why did you choose to implement access to user memory from the
+>> kernel in the way that you did?
+This is a lot more straightforward and easier to debug.
+
+>> B10: What advantages or disadvantages can you see to your design
+>> for file descriptors?
+Pro: Each thread has a list of file_descriptors, and so the list can easily extend
+infinitely.
+Con: file descriptor sharing between threads is not possible. There are many duplicates
+in the system.
+
+>> B11: The default tid_t to pid_t mapping is the identity mapping.
+>> If you changed it, what advantages are there to your approach?
+Since we have a process control block, it is very easy to map multiple threads to
+our pcb and thus we can scale very easily. The problem is, my children and file 
+descriptors are stored in struct thread. So in case of a multi thread to one process
+mapping, we have to shift these members into the pcb. 
+
+			   SURVEY QUESTIONS
+			   ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?
