@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <list.h>
+#include "threads/thread.h"
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
 #include "threads/malloc.h"
@@ -11,6 +12,7 @@ struct dir
   {
     struct inode *inode;                /* Backing store. */
     off_t pos;                          /* Current position. */
+    uint8_t position_occupier_not_used;  /* struct dir and struct file are thus interchangeable. See sys_readdir */
   };
 
 /* A single directory entry. */
@@ -21,13 +23,122 @@ struct dir_entry
     bool in_use;                        /* In use or free? */
   };
 
+static bool check_dir_empty (struct inode *inode);
+static char* strdup(const char* src);
+
+int dir_entry_size() {
+  return sizeof(struct dir_entry);
+}
+
+
+
+
+
+
+static char* strdup(const char* src) {
+  int length = strlen(src);
+  char* copy = malloc(sizeof (char) * (length + 1));
+  memcpy(copy, src, sizeof(char) * (length + 1));
+  return copy;
+}
+
+char* pick_filename(const char* path) {
+  char* copy = strdup(path);
+  int i;
+  ASSERT(strlen(path)==strlen(copy));
+  for (i = strlen(copy); (copy[i] != '/' && i != 0) ; i--) {
+  }
+  char* name;
+  if (copy[i] != '/') {
+    name = &copy[i];
+  } else {
+    name = &copy[i+1];
+  }
+  char* ret = strdup(name);
+  free(copy);
+  return ret;
+}
+
+
+char* pick_pure_directory_path(const char* path) {
+  char* copy = strdup(path);
+  int i;
+  ASSERT(strlen(path)==strlen(copy));
+  for (i = strlen(copy); (copy[i] != '/' && i != 0) ; i--) {
+  }
+
+  if (copy[i] == '/') {
+    copy[i+1] = '\0';
+  } else {
+    copy[i] = '\0';
+  }
+  char* ret = strdup(copy);
+  free(copy);
+  return ret;
+}
+
+
+// traverse the directory path one by one.
+struct dir* dir_traverse (const char *path) {
+  char* copy = strdup(path);
+  struct dir *curr;
+
+  if(copy[0] == '/') {
+    curr = dir_open_root();
+  } else {
+    struct thread *t = thread_current();
+    if (t->cwd == NULL)
+      curr = dir_open_root();
+    else {
+      curr = dir_reopen( t->cwd );
+    }
+  }
+
+  char *token, *save_ptr;
+  for (token = strtok_r(copy, "/", &save_ptr); 
+       token != NULL;
+       token = strtok_r(NULL, "/", &save_ptr))
+  {
+    struct inode *inode = NULL;
+    if(!dir_lookup(curr, token, &inode)) goto FAIL;
+    struct dir *next = dir_open(inode);
+    dir_close(curr);
+    curr = next;
+  }
+
+  if (inode_is_removed (dir_get_inode(curr))) goto FAIL;
+
+  return curr;
+
+FAIL:
+  free(copy);
+  dir_close(curr);
+  return NULL;
+}
+
+
 /* Creates a directory with space for ENTRY_CNT entries in the
    given SECTOR.  Returns true if successful, false on failure. */
-bool
-dir_create (block_sector_t sector, size_t entry_cnt)
+bool dir_create (block_sector_t sector, size_t entry_cnt)
 {
-  return inode_create (sector, entry_cnt * sizeof (struct dir_entry));
+  bool success = inode_create (sector, entry_cnt * sizeof (struct dir_entry), DIR_INODE);
+  if(!success) 
+    return false;
+
+// set 1st entry to be parent. Put your own inode sector here, since dir_create
+// is called during formatting. Parent of root is root itself. Reserve the space.
+  struct dir *dir = dir_open(inode_open(sector));
+  struct dir_entry e;
+  e.inode_sector = sector;
+  strlcpy (e.name, "..", sizeof e.name);
+  if (inode_write_at(dir->inode, &e, sizeof e, 0) != sizeof e) 
+    success = false;
+  dir_close (dir);
+
+  return success;
 }
+
+
 
 /* Opens and returns the directory for the given INODE, of which
    it takes ownership.  Returns a null pointer on failure. */
@@ -54,15 +165,17 @@ dir_open (struct inode *inode)
 struct dir *
 dir_open_root (void)
 {
-  return dir_open (inode_open (ROOT_DIR_SECTOR));
+  return dir_open(inode_open (ROOT_DIR_SECTOR));
 }
+
+
 
 /* Opens and returns a new directory for the same inode as DIR.
    Returns a null pointer on failure. */
 struct dir *
 dir_reopen (struct dir *dir) 
 {
-  return dir_open (inode_reopen (dir->inode));
+  return dir_open(inode_reopen (dir->inode));
 }
 
 /* Destroys DIR and frees associated resources. */
@@ -111,23 +224,30 @@ lookup (const struct dir *dir, const char *name,
   return false;
 }
 
+
+
+
+
 /* Searches DIR for a file with the given NAME
    and returns true if one exists, false otherwise.
    On success, sets *INODE to an inode for the file, otherwise to
    a null pointer.  The caller must close *INODE. */
 bool
-dir_lookup (const struct dir *dir, const char *name,
-            struct inode **inode) 
+dir_lookup (const struct dir *dir, 
+            const char *name,
+            struct inode **inode)
 {
   struct dir_entry e;
 
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
+  *inode = NULL;
 
-  if (lookup (dir, name, &e, NULL))
+  if (strcmp (name, ".") == 0) {
+    *inode = inode_reopen (dir->inode);
+  } else if (lookup (dir, name, &e, NULL)) {
     *inode = inode_open (e.inode_sector);
-  else
-    *inode = NULL;
+  }
 
   return *inode != NULL;
 }
@@ -139,7 +259,10 @@ dir_lookup (const struct dir *dir, const char *name,
    Fails if NAME is invalid (i.e. too long) or a disk or memory
    error occurs. */
 bool
-dir_add (struct dir *dir, const char *name, block_sector_t inode_sector)
+dir_add (struct dir *dir, 
+         const char *name, 
+         block_sector_t inode_sector, 
+         enum inode_type type)
 {
   struct dir_entry e;
   off_t ofs;
@@ -148,23 +271,36 @@ dir_add (struct dir *dir, const char *name, block_sector_t inode_sector)
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
 
-  /* Check NAME for validity. */
   if (*name == '\0' || strlen (name) > NAME_MAX)
     return false;
 
-  /* Check that NAME is not in use. */
   if (lookup (dir, name, NULL, NULL))
     goto done;
+
+  // update the first entry of child directory to be parent
+  if (type == DIR_INODE)
+  {
+    struct dir *child_dir = dir_open( inode_open(inode_sector) );
+    if(child_dir == NULL) goto done;
+
+    e.inode_sector = inode_get_inumber( dir_get_inode(dir) );
+    strlcpy (e.name, "..", sizeof e.name);
+    if (inode_write_at(child_dir->inode, &e, sizeof e, 0) != sizeof e) {
+      dir_close (child_dir);
+      goto done;
+    }
+    dir_close (child_dir);
+  }
 
   /* Set OFS to offset of free slot.
      If there are no free slots, then it will be set to the
      current end-of-file.
-     
+
      inode_read_at() will only return a short read at end of file.
      Otherwise, we'd need to verify that we didn't get a short
      read due to something intermittent such as low memory. */
   for (ofs = 0; inode_read_at (dir->inode, &e, sizeof e, ofs) == sizeof e;
-       ofs += sizeof e) 
+       ofs += sizeof e)
     if (!e.in_use)
       break;
 
@@ -178,11 +314,26 @@ dir_add (struct dir *dir, const char *name, block_sector_t inode_sector)
   return success;
 }
 
+
+
+bool check_dir_empty (struct inode *inode) {
+  struct dir_entry e;
+  off_t ofs;
+
+  for (ofs = sizeof e;
+       inode_read_at (inode, &e, sizeof e, ofs) == sizeof e;
+       ofs += sizeof e) {
+    if (e.in_use)
+      return false;
+  }
+  return true;
+}
+
+
 /* Removes any entry for NAME in DIR.
    Returns true if successful, false on failure,
    which occurs only if there is no file with the given NAME. */
-bool
-dir_remove (struct dir *dir, const char *name) 
+bool dir_remove (struct dir *dir, const char *name) 
 {
   struct dir_entry e;
   struct inode *inode = NULL;
@@ -192,6 +343,9 @@ dir_remove (struct dir *dir, const char *name)
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
 
+  if (!strcmp (name, ".") || !strcmp (name, ".."))
+    return false;
+
   /* Find directory entry. */
   if (!lookup (dir, name, &e, &ofs))
     goto done;
@@ -200,6 +354,14 @@ dir_remove (struct dir *dir, const char *name)
   inode = inode_open (e.inode_sector);
   if (inode == NULL)
     goto done;
+
+
+  /* Verify that it is not an in-use or non-empty directory. */
+  if (inode_is_directory(inode)) {
+    bool empty = check_dir_empty (inode);
+    if (!empty )
+      goto done;
+  }
 
   /* Erase directory entry. */
   e.in_use = false;
@@ -221,16 +383,19 @@ dir_remove (struct dir *dir, const char *name)
 bool
 dir_readdir (struct dir *dir, char name[NAME_MAX + 1])
 {
+  //printf("enter dir_readdir\n");
   struct dir_entry e;
 
-  while (inode_read_at (dir->inode, &e, sizeof e, dir->pos) == sizeof e) 
+
+  while (inode_read_at (dir->inode, &e, sizeof e, dir->pos) == sizeof e)
     {
       dir->pos += sizeof e;
-      if (e.in_use)
+      if (e.in_use && !!strcmp(e.name, ".."))
         {
           strlcpy (name, e.name, NAME_MAX + 1);
+          //printf("readdir_name: %s at sector %d\n", e.name, e.inode_sector);
           return true;
-        } 
+        }
     }
   return false;
 }

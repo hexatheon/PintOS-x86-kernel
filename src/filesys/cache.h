@@ -24,13 +24,7 @@ Only these two are exposed to make buffer cache more modularized.
 */
 void cache_read (struct block* device, block_sector_t sector, void* buffer);
 void cache_write (struct block* device, block_sector_t sector, void* buffer);
-struct cache_block *cache_lock (block_sector_t, enum lock_type);
-// void *cache_read (struct cache_block *);
-// void *cache_zero (struct cache_block *);
-// void cache_dirty (struct cache_block *);
-// void cache_unlock (struct cache_block *);
-// void cache_free (block_sector_t);
-// void cache_readahead (block_sector_t);
+
 
 //New
 /*

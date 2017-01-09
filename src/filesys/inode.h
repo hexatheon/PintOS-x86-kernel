@@ -7,6 +7,7 @@
 
 struct bitmap;
 
+/* Type of an inode. */
 enum inode_type
 {
 	FILE_INODE,         /* Ordinary file. */
@@ -14,10 +15,16 @@ enum inode_type
 };
 
 void inode_init (void);
-bool inode_create (block_sector_t, off_t);//to change
+
+bool inode_create (block_sector_t, off_t, enum inode_type type);//to change
+
+
 struct inode *inode_open (block_sector_t);
 struct inode *inode_reopen(struct inode *);
-enum inode_type inode_get_type(const struct inode *);//new
+
+//enum inode_type inode_get_type(const struct inode *);
+
+
 block_sector_t inode_get_inumber (const struct inode *);
 void inode_close (struct inode *);
 void inode_remove (struct inode *);
@@ -26,9 +33,44 @@ off_t inode_write_at (struct inode *, const void *, off_t size, off_t offset);
 void inode_deny_write (struct inode *);
 void inode_allow_write (struct inode *);
 off_t inode_length (const struct inode *);
-int inode_open_cnt(const struct inode *);
-void inode_lock(struct inode *);
-void inode_unlock(struct inode *);
+
+//int inode_open_cnt(const struct inode *);
+
+//void inode_lock(struct inode *);
+//void inode_unlock(struct inode *);
+
+bool inode_is_removed (const struct inode* inode);
+bool inode_is_directory (const struct inode* inode);
 
 
+
+
+
+
+
+
+//struct inode
+//{
+//	struct list_elem elem;              /* Element in inode list. */
+//	block_sector_t sector;              /* Sector number of disk location. */
+//	int open_cnt;                       /* Number of openers. */
+//	bool removed;                       /* True if deleted, false otherwise. */
+//	struct lock lock;                   /* Protects the inode. */
+//
+//	/* Denying writes. */
+//	struct lock deny_write_lock;        /* Protects members below. */
+//	struct condition no_writers_cond;   /* Signaled when no writers. */
+//	int deny_write_cnt;                 /* 0: writes ok, >0: deny writes. */
+//	int writer_cnt;                     /* Number of writers. */
+//
+//	//to delete
+//	struct inode_disk data;             /* Inode content. */
+//};
+//struct inode_disk
+//{
+//	block_sector_t sectors[SECTOR_CNT]; /* Sectors. */
+//	off_t length;                       /* File size in bytes. */
+//	enum inode_type type;               /* FILE_INODE or DIR_INODE. */
+//	unsigned magic;                     /* Magic number. */
+//};
 #endif /* filesys/inode.h */
